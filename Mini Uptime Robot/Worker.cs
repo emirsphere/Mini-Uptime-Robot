@@ -1,99 +1,52 @@
-using System.Diagnostics;
+using Mini_Uptime_Robot.Services;
 
 namespace Mini_Uptime_Robot
 {
-    public class WebsiteResult
-    {
-        public int Latency { get; set; }
-        public int StatusCode { get; set; }
-        public bool IsSuccess { get; set; }
-        public string? ErrorMessage { get; set; }
-    }
-
+    
     public class Worker : BackgroundService
     {
-        private static readonly HttpClient client = new HttpClient();
+        private readonly IUptimeCheckerService _uptimeCheckerService;
         private readonly ILogger<Worker> _logger;
         private readonly IConfiguration _configuration;
-
-        public Worker(ILogger<Worker> logger, IConfiguration configuration)
+        public Worker(ILogger<Worker> logger, IConfiguration configuration, IUptimeCheckerService uptimeCheckerService)
         {
             _logger = logger;
-            client.Timeout = TimeSpan.FromSeconds(10);
             _configuration = configuration;
+            _uptimeCheckerService = uptimeCheckerService;
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
             while (!stoppingToken.IsCancellationRequested)
             {
-                string url = _configuration.GetValue<string>("RobotSettings:TargetUrl") ?? "https://www.google.com";
+                var urls = _configuration.GetSection("RobotSettings:TargetUrls").Get<string[]>()
+                           ?? new[] { "https://www.google.com" };
                 int delaySeconds = _configuration.GetValue<int>("RobotSettings:IntervalSeconds");
-                try
+                var parallelOptions = new ParallelOptions
                 {
-                    WebsiteResult result = await GetResultAsync(url);
+                    MaxDegreeOfParallelism = 10,
+                    CancellationToken = stoppingToken
+                };
+                _logger.LogInformation("--- Yeni Kontrol Döngüsü Baþladý ({count} Site) ---", urls.Length);
+
+                await Parallel.ForEachAsync(urls, parallelOptions, async (url, token) =>
+                {
+                    var result = await _uptimeCheckerService.CheckAsync(url, token);
+
                     if (result.IsSuccess)
                     {
-                        _logger.LogInformation("Siteye eriþildi. Kod: {code}, Süre: {ms} ms",
-                            result.StatusCode, result.Latency);
+                        _logger.LogInformation("Siteye eriþildi [{url}]. Kod: {code}, Süre: {ms} ms",
+                            url, result.StatusCode, result.Latency);
                     }
                     else
                     {
-                        _logger.LogWarning("Sitede sorun var! Kod: {code}, Hata: {err}",
-                            result.StatusCode, result.ErrorMessage);
+                        _logger.LogWarning("Sitede sorun var [{url}]! Kod: {code}, Hata: {err}",
+                            url, result.StatusCode, result.ErrorMessage);
                     }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Kritik Hata: Siteye hiç ulaþýlamadý!");
-                }
-
+                });
+                _logger.LogInformation("--- Kontrol Döngüsü Bitti. {delay} sn bekleniyor... ---", delaySeconds);
                 await Task.Delay(delaySeconds * 1000, stoppingToken);
             }
-        }
-
-        private async Task<WebsiteResult> GetResultAsync(string url)
-        {
-            var result = new WebsiteResult();
-            var stopwatch = StartStopWatch();
-
-            try
-            {
-                var request = new HttpRequestMessage(HttpMethod.Head, url);
-
-                using (var response = await client.SendAsync(request))
-                {
-                    // Saati durdur ve kaydet
-                    result.Latency = StopStopWatch(stopwatch);
-                    result.StatusCode = (int)response.StatusCode;
-                    result.IsSuccess = response.IsSuccessStatusCode;
-
-                    if (!result.IsSuccess)
-                    {
-                        result.ErrorMessage = "Sunucu hata kodu döndürdü.";
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                result.Latency = StopStopWatch(stopwatch);
-                result.IsSuccess = false;
-                result.StatusCode = 0; 
-                result.ErrorMessage = ex.Message;
-            }
-
-            return result;
-        }
-
-        private Stopwatch StartStopWatch()
-        {
-            return Stopwatch.StartNew();
-        }
-
-        private int StopStopWatch(Stopwatch stopwatch)
-        {
-            stopwatch.Stop();
-            return (int)stopwatch.ElapsedMilliseconds;
         }
     }
 }
